@@ -1,4 +1,5 @@
 import { Geist, Geist_Mono, Inter } from "next/font/google"
+import Script from "next/script"
 
 import "./globals.css"
 import { ThemeProvider } from "@/components/theme-provider"
@@ -24,6 +25,22 @@ export default function RootLayout({
     >
       <body>
         <ThemeProvider>{children}</ThemeProvider>
+        <Script
+          type="module"
+          strategy="lazyOnload"
+          dangerouslySetInnerHTML={{
+            __html: `
+              import Typebot from 'https://cdn.jsdelivr.net/npm/@typebot.io/js@0.3/dist/web.js'
+              Typebot.initBubble({
+                typebot: 'lead-scoring-a0cl32c',
+                theme: {
+                  button: { backgroundColor: '#10b981', color: '#fff' },
+                  chatWindow: { backgroundColor: '#18181b' },
+                },
+              })
+            `,
+          }}
+        />
       </body>
     </html>
   )
