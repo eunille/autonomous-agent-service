@@ -39,10 +39,11 @@ def _get_groq() -> Groq:
 def _get_gemini():
     global _gemini_client
     if _gemini_client is None:
-        if not GEMINI_API_KEY:
+        api_key = os.getenv("GEMINI_API_KEY", "")
+        if not api_key:
             raise EnvironmentError("GEMINI_API_KEY is not set.")
         import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
+        genai.configure(api_key=api_key)
         _gemini_client = genai.GenerativeModel("gemini-1.5-flash")
     return _gemini_client
 
@@ -150,10 +151,7 @@ def score_lead(
         return _parse_score(response.choices[0].message.content or "")
     except Exception as exc:
         groq_exc = exc
-        if "rate_limit" in str(exc).lower() or "429" in str(exc):
-            logger.warning("Groq rate limit hit — falling back to Gemini for scoring.")
-        else:
-            logger.error("score_lead Groq failed: %s", exc)
+        logger.warning("score_lead Groq failed (%s) — falling back to Gemini.", exc)
 
     # Gemini fallback for scoring
     try:
