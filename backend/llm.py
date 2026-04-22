@@ -138,6 +138,8 @@ PH logistics firm, 300 employees, no recent news, stable → ~61 WARM
 Unknown company, no verifiable data → ~47 COLD (13+11+9+14)
 Apple Inc (166,000 employees) → ~5 DISQUALIFY (0+5+22+20, hard cap)
 
+NOTE: The size_signals field may show a midpoint of a reported range (e.g. "~350 employees (range: 201–500)"). Always use the midpoint value for scoring, NOT the upper bound of the range. If size_signals says "~350 employees", apply the 150–350 pts bracket (24 pts) or 350–500 bracket (16 pts) based on which side of 350 it falls. Never penalize a 200-employee company using the 500-employee bracket.
+
 Return ONLY a valid JSON object (no markdown, no extra text):
 {
   "score": <integer 0-100>,

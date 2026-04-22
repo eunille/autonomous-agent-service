@@ -91,13 +91,24 @@ def search_company(company_name: str) -> dict:
     description = snippets[0] if snippets else "No description found."
     recent_news = snippets[1:4] if len(snippets) > 1 else []
 
-    # Rough size signal from snippets
-    size_signal = "Unknown"
+    # Extract employee count via regex — handles ranges like "201-500 employees"
+    # Uses midpoint of range to avoid "500" in "201-500" being treated as 500+ employees
     combined = " ".join(snippets).lower()
-    for marker in ["10,000", "5,000", "1,000", "500", "200", "100", "50"]:
-        if marker in combined or f"{marker} employees" in combined:
-            size_signal = f"~{marker} employees (from search)"
-            break
+    size_signal = "Unknown"
+    range_match = re.search(
+        r"(\d{1,3}(?:,\d{3})*)\s*[\u2013\-]\s*(\d{1,3}(?:,\d{3})*)\s*employees",
+        combined,
+        re.IGNORECASE,
+    )
+    if range_match:
+        lower = int(range_match.group(1).replace(",", ""))
+        upper = int(range_match.group(2).replace(",", ""))
+        mid = (lower + upper) // 2
+        size_signal = f"~{mid} employees (range: {lower}\u2013{upper})"
+    else:
+        exact_match = re.search(r"(\d+)\+?\s+employees", combined, re.IGNORECASE)
+        if exact_match:
+            size_signal = f"~{exact_match.group(1)} employees"
 
     return {
         "company": company_name,
@@ -125,13 +136,24 @@ def search_recent_activity(company_name: str) -> dict:
     combined = " ".join(snippets).lower()
 
     hiring_signal = "No hiring activity found."
-    for keyword in ["open roles", "job opening", "hiring", "new position", "we're hiring"]:
+    hiring_keywords = [
+        "we're hiring", "now hiring", "is hiring", "join our team",
+        "open roles", "job opening", "job openings", "new position",
+        "careers", "we are hiring", "hiring for", "looking for",
+    ]
+    for keyword in hiring_keywords:
         if keyword in combined:
             hiring_signal = f"Active hiring detected ({keyword} mentioned in results)."
             break
 
     funding_signal = "No funding news found."
-    for keyword in ["raised", "series a", "series b", "seed round", "funding", "million", "valuation"]:
+    funding_keywords = [
+        "series a", "series b", "series c", "seed round", "pre-seed",
+        "raised $", "raised usd", "secured funding", "investment round",
+        "venture capital", "funding round", "million in funding",
+        "raised", "funding", "million", "valuation",
+    ]
+    for keyword in funding_keywords:
         if keyword in combined:
             funding_signal = f"Funding activity detected ({keyword} mentioned)."
             break
