@@ -16,7 +16,7 @@ import concurrent.futures
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 
@@ -34,6 +34,7 @@ class AgentRun:
     email: str
     source: str = "unknown"
     service_interest: str | None = None
+    region: str = "Philippines"
 
     steps: int = 0
     tool_results: dict[str, Any] = field(default_factory=dict)
@@ -48,11 +49,15 @@ def run_agent(
     email: str,
     source: str = "unknown",
     service_interest: str | None = None,
+    region: str = "Philippines",
+    on_step: Callable[[str], None] | None = None,
 ) -> AgentRun:
     """
     Run the full lead qualification pipeline — direct sequential execution.
 
-    Steps:
+    Args:
+        on_step: Optional callback called with a status string at each pipeline step.
+                 Used by the batch SSE endpoint to stream progress to the client.
       1. search_company + search_recent_activity  (parallel)
       2. score_lead                               (Groq LLM, Gemini fallback)
       3. draft_outreach_email                     (Gemini, only if score >= 40)
@@ -72,14 +77,17 @@ def run_agent(
         email=email,
         source=source,
         service_interest=service_interest,
+        region=region,
     )
 
     # ── Step 1: Parallel web research ─────────────────────────────────────
     logger.info("Pipeline starting for lead: %s @ %s", lead_name, company)
+    if on_step:
+        on_step("researching")
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            f_company = executor.submit(search_company, company)
-            f_activity = executor.submit(search_recent_activity, company)
+            f_company = executor.submit(search_company, company, run.region)
+            f_activity = executor.submit(search_recent_activity, company, run.region)
             company_info = f_company.result(timeout=30)
             recent_activity = f_activity.result(timeout=30)
     except Exception as exc:
@@ -94,6 +102,8 @@ def run_agent(
                 bool(company_info), bool(recent_activity))
 
     # ── Step 2: Score lead ────────────────────────────────────────────────
+    if on_step:
+        on_step("scoring")
     try:
         score_result = score_lead(
             lead_name=lead_name,
@@ -122,6 +132,8 @@ def run_agent(
     # ── Step 3: Draft outreach email (score >= 40 only) ───────────────────
     email_result: dict[str, Any] = {}
     if score >= 40:
+        if on_step:
+            on_step("drafting_email")
         try:
             email_result = draft_email(
                 lead_name=lead_name,
@@ -148,6 +160,8 @@ def run_agent(
 
     # ── Step 4: Log to Supabase ───────────────────────────────────────────
     lead_id = None
+    if on_step:
+        on_step("logging")
     try:
         lead_profile = _build_lead_profile(run)
         log_result = log_lead(lead_profile)
@@ -198,6 +212,8 @@ def run_agent(
         f"Score {score}/100 ({tier}). "
         f"{run.steps} steps completed."
     )
+    if on_step:
+        on_step("done")
     logger.info(run.final_summary)
     return run
 
@@ -231,6 +247,7 @@ def _build_lead_profile(run: AgentRun) -> dict:
         "email_subject": email_result.get("subject", ""),
         "status": "new",
         "agent_steps": run.steps,
+        "region": run.region,
     }
 
 

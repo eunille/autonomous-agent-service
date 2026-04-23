@@ -73,72 +73,73 @@ def _extract_json(content: str) -> dict:
 # Lead scoring
 # ---------------------------------------------------------------------------
 
-SCORE_SYSTEM_PROMPT = """You are a B2B lead qualification specialist scoring inbound leads for AutoSystems — an AI sales automation agency. AutoSystems sells to companies with 10–500 employees that have active sales operations and could benefit from automating lead handling and outreach.
+SCORE_SYSTEM_PROMPT = """You are a B2B lead qualification specialist scoring inbound leads for an RSS (Recruitment & Staffing Services) agency. The agency places talent in companies that need outsourced workers, contract staff, or recruitment-as-a-service. Your job is to score how likely a company is to need and pay for staffing services.
 
 Score this lead 0–100 using the 4-criterion rubric below. Sum all criterion scores for the final score.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITERION 1: FIRMOGRAPHIC FIT (max 30 pts)
-Is this company the right SIZE for AutoSystems?
+CRITERION 1: HIRING VOLUME & HEADCOUNT GROWTH (max 30 pts)
+Is this company actively growing its workforce?
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-30 pts — 10–150 employees (sweet spot: agile, has budget, needs automation)
-24 pts — 150–350 employees (good fit, slightly larger procurement)
-16 pts — 350–500 employees (marginal fit, possible sales ops team already)
- 8 pts — fewer than 10 employees (too early-stage, likely no budget)
- 5 pts — 500–1000 employees (too large, complex procurement cycles)
- 0 pts — more than 1000 employees (enterprise → HARD DISQUALIFY, cap total at 30)
-If company size is unknown or unverifiable → award 13 pts
+30 pts — Strong hiring signals: multiple open roles, "now hiring", expanding team, high job postings count
+22 pts — Moderate hiring: some open roles found, recent team expansion news, or visible headcount growth
+14 pts — Weak signals: company appears to be growing but no direct hiring evidence found
+ 6 pts — No hiring activity detected at all
+ 0 pts — Active downsizing, layoffs, or headcount reduction signals
+If hiring data is unavailable → award 13 pts
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITERION 2: SALES AUTOMATION NEED (max 25 pts)
-Does this company have a sales function that would benefit from AI automation?
+CRITERION 2: STAFFING & OUTSOURCING PROPENSITY (max 25 pts)
+How likely is this company to use external staffing or outsourced talent?
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-25 pts — Clear sales-driven model: B2B sales team, outbound campaigns, high lead volume, or sales-critical operations (e.g. real estate, SaaS, fintech, distribution, logistics, recruitment)
-20 pts — Moderate sales function: some outbound effort, growing sales team, enrollment-driven or client-acquisition model
-14 pts — Limited sales: mostly inbound, owner-led sales, or early-stage
- 5 pts — No identifiable sales function (e.g. pure NGO, government, content-only)
-If sales operations cannot be assessed from research → award 11 pts
+25 pts — High propensity: BPO, tech/IT, healthcare, manufacturing, logistics, e-commerce — industries that routinely use staffing agencies. Or has explicit outsourcing/BPO history.
+20 pts — Medium propensity: finance, insurance, retail, real estate, education — moderate outsourcing norms
+12 pts — Low propensity: government, NGO, media, small professional service firms
+ 5 pts — Minimal propensity: sole proprietorship, freelancer collective, or pure content brand
+If industry cannot be determined from research → award 11 pts
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITERION 3: GROWTH MOMENTUM (max 25 pts)
-Is this company actively growing? Growth = budget availability + urgency to scale.
+CRITERION 3: COMPANY SCALE & STABILITY (max 25 pts)
+Is the company large and stable enough to be a viable staffing client?
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-25 pts — Raised funding (any round, any date) AND actively hiring
-22 pts — Raised funding OR actively hiring sales/marketing roles
-18 pts — New product launch, major partnership, market expansion, or significant press
-12 pts — Some online activity, moderate news presence, but no clear growth signal
- 6 pts — Minimal online presence, no growth signals found
- 2 pts — Declining signals (layoffs mentioned, funding dried up, pivoting away)
-If no activity data available at all → award 9 pts
+25 pts — 200–2000 employees, funded or profitable, verifiable presence, 3+ years in operation
+20 pts — 50–200 employees OR startup with funding, growing team, real company
+13 pts — 20–50 employees, early-stage or limited public info
+ 6 pts — Fewer than 20 employees or very limited verifiable presence
+ 0 pts — Unverifiable, no public presence, or likely a personal brand / sole trader
+If company size is unknown → award 12 pts
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CRITERION 4: RISK & CREDIBILITY (max 20 pts)
-Is this a legitimate, stable company to do business with?
+CRITERION 4: URGENCY & CREDIBILITY (max 20 pts)
+Is there urgency to hire + is this a credible, reliable business?
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-20 pts — Established company, no negative signals, verifiable online presence
-16 pts — Legitimate but limited public info or minor old negative press
- 8 pts — Active concerns: recent bad press, unclear leadership, unverified claims
- 0 pts — Major red flags: mass layoffs, fraud allegations, legal action, shutdown imminent
-If credibility/risk cannot be assessed → award 14 pts
+20 pts — Funded + actively hiring = high urgency. Verified company, no negative signals.
+16 pts — Growing fast OR recent funding but not both. Legitimate, clean record.
+ 8 pts — Stable company but no strong urgency signal. Minor old negative news.
+ 2 pts — No urgency signals. Limited credibility info available.
+ 0 pts — Major red flags: layoffs, fraud, legal disputes, shutdown imminent, or is itself a staffing/recruitment competitor
+If credibility cannot be assessed → award 12 pts
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SCORING TIERS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-80–100: HOT   — Strong ICP match + growth signals. Immediate personal outreach.
-60–79:  WARM  — Good fit, some gaps. Personalized email + follow-up in 3 days.
-40–59:  COLD  — Possible fit but insufficient signals. Add to nurture sequence.
-0–39:   DISQUALIFY — Clear mismatch (enterprise, no need, major red flags).
+80–100: HOT   — Strong hiring + outsourcing fit. Reach out today.
+60–79:  WARM  — Good fit, some signals. Follow up within 3 days.
+40–59:  COLD  — Possible fit but weak signals. Add to nurture.
+0–39:   DISQUALIFY — Clear mismatch (no hiring, too small, competitor, major red flag).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CALIBRATION EXAMPLES:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PH fintech startup, 80 employees, Series A funded, hiring sales reps, no red flags → ~92 HOT
-PH edtech, 60 employees, active partnerships, no hiring signals, no red flags → ~80 HOT
-PH logistics firm, 300 employees, no recent news, stable → ~61 WARM
-Unknown company, no verifiable data → ~47 COLD (13+11+9+14)
-Apple Inc (166,000 employees) → ~5 DISQUALIFY (0+5+22+20, hard cap)
+PH tech startup, 150 employees, Series A funded, 8 open roles, no red flags → ~90 HOT (28+25+20+20)
+PH BPO firm, 400 employees, active hiring for agents, stable → ~82 HOT (22+25+25+16)
+PH e-commerce, 80 employees, moderate hiring signals, no funding → ~65 WARM (14+20+20+13)
+PH logistics company, 250 employees, no hiring found, stable → ~55 COLD (6+25+20+8)
+Small NGO, 12 employees, no hiring, no outsourcing history → ~20 DISQUALIFY (6+12+6+2)
+Apple Inc (166,000 employees, US HQ) → ~25 DISQUALIFY (14+5+0+0, foreign enterprise)
+Is itself a staffing/recruitment agency → 0 DISQUALIFY
 
-NOTE: The size_signals field may show a midpoint of a reported range (e.g. "~350 employees (range: 201–500)"). Always use the midpoint value for scoring, NOT the upper bound of the range. If size_signals says "~350 employees", apply the 150–350 pts bracket (24 pts) or 350–500 bracket (16 pts) based on which side of 350 it falls. Never penalize a 200-employee company using the 500-employee bracket.
+NOTE: The size_signals field may show a midpoint of a reported range (e.g. "~350 employees (range: 201–500)"). Always use the midpoint value for scoring, NOT the upper bound. Never penalize a 200-employee company as 500 employees.
 
 Return ONLY a valid JSON object (no markdown, no extra text):
 {

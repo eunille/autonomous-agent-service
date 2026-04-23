@@ -64,7 +64,7 @@ def _extract_organic(raw: dict) -> list[dict]:
     return raw.get("organic", [])
 
 
-def search_company(company_name: str) -> dict:
+def search_company(company_name: str, region: str = "Philippines") -> dict:
     """
     Search for general company information.
 
@@ -72,7 +72,8 @@ def search_company(company_name: str) -> dict:
       - company, description, industry, size_signals,
         website, founded, recent_news (list)
     """
-    query = f"{company_name} company overview employees industry"
+    region_tag = f" {region}" if region else ""
+    query = f"{company_name}{region_tag} company overview employees industry"
     raw = _serper_search(query, num_results=5)
     organic = _extract_organic(raw)
 
@@ -121,14 +122,15 @@ def search_company(company_name: str) -> dict:
     }
 
 
-def search_recent_activity(company_name: str) -> dict:
+def search_recent_activity(company_name: str, region: str = "Philippines") -> dict:
     """
     Search for recent company news, hiring, and funding signals.
 
     Returns a structured dict with:
       - hiring, news (list), social, funding
     """
-    query = f"{company_name} hiring jobs funding news 2025 2026"
+    region_tag = f" {region}" if region else ""
+    query = f"{company_name}{region_tag} hiring jobs outsourcing staffing news 2025 2026"
     raw = _serper_search(query, num_results=5)
     organic = _extract_organic(raw)
 

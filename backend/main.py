@@ -6,19 +6,23 @@ Accepts a lead and triggers the full autonomous qualification agent.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
 import sys
+import time
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Security, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Security, status
+from fastapi.responses import StreamingResponse
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from dotenv import load_dotenv
 
 from agent import run_agent
+from database import fetch_leads
 
 load_dotenv()
 
@@ -73,6 +77,7 @@ class LeadRequest(BaseModel):
     email: str = Field(..., description="Lead's email address.")
     source: str = Field(default="api", max_length=100, description="Traffic source (optional).")
     service_interest: str | None = Field(default=None, max_length=500, description="Which service(s) the lead is interested in.")
+    region: str = Field(default="Philippines", max_length=100, description="Company region or country for search scoping.")
 
     @field_validator("email")
     @classmethod
@@ -118,6 +123,212 @@ def health_check() -> dict:
     return {"status": "ok", "service": "lead-qualification-agent"}
 
 
+@app.get("/leads")
+def list_leads(
+    limit: int = 50,
+    offset: int = 0,
+    _: str = Depends(require_api_key),
+) -> dict:
+    """
+    Fetch paginated lead run history from Supabase.
+
+    Requires X-API-Key header.
+    """
+    if limit < 1 or limit > 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="limit must be between 1 and 200.",
+        )
+    if offset < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="offset must be non-negative.",
+        )
+    result = fetch_leads(limit=limit, offset=offset)
+    if not result["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "Failed to fetch leads."),
+        )
+    return {"leads": result["leads"], "limit": limit, "offset": offset}
+
+
+# ---------------------------------------------------------------------------
+# Batch qualification — Server-Sent Events stream
+# ---------------------------------------------------------------------------
+
+MAX_BATCH_LEADS = 10
+BATCH_LEAD_DELAY_SECONDS = 2
+
+
+class BatchLeadItem(BaseModel):
+    lead_name: str = Field(..., min_length=1, max_length=255)
+    company: str = Field(..., min_length=1, max_length=255)
+    email: str = Field(..., max_length=320)
+    source: str = Field(default="batch", max_length=100)
+    service_interest: str | None = Field(default=None, max_length=500)
+    region: str = Field(default="Philippines", max_length=100)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        v = v.strip().lower()
+        if not EMAIL_PATTERN.match(v):
+            raise ValueError("Invalid email format.")
+        return v
+
+    @field_validator("lead_name", "company", "source")
+    @classmethod
+    def strip_whitespace(cls, v: str) -> str:
+        return v.strip()
+
+
+class BatchRequest(BaseModel):
+    leads: list[BatchLeadItem] = Field(..., min_length=1)
+
+
+def _sse_event(data: dict) -> str:
+    """Format a dict as an SSE data event."""
+    return f"data: {json.dumps(data)}\n\n"
+
+
+@app.post("/qualify-batch")
+def qualify_batch(
+    batch: BatchRequest,
+    request: Request,
+    _: str = Depends(require_api_key),
+) -> StreamingResponse:
+    """
+    Qualify a batch of leads with real-time Server-Sent Events progress streaming.
+
+    Emits one event per pipeline step. Max 10 leads per batch.
+    Requires X-API-Key header.
+    """
+    if len(batch.leads) > MAX_BATCH_LEADS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Batch exceeds maximum of {MAX_BATCH_LEADS} leads.",
+        )
+
+    async def event_stream():
+        yield _sse_event({"type": "batch_start", "total": len(batch.leads)})
+
+        for i, lead_item in enumerate(batch.leads):
+            yield _sse_event({
+                "type": "lead_start",
+                "index": i,
+                "lead_name": lead_item.lead_name,
+                "company": lead_item.company,
+            })
+
+            step_events: list[str] = []
+
+            def on_step(step: str, company: str = lead_item.company, idx: int = i) -> None:
+                step_events.append(step)
+
+            try:
+                # Yield step events synchronously — generator runs in thread context
+                # We flush via a thread trick: collect steps and yield between leads
+                import threading
+
+                result_holder: list = []
+                error_holder: list = []
+
+                def _run() -> None:
+                    try:
+                        run = run_agent(
+                            lead_name=lead_item.lead_name,
+                            company=lead_item.company,
+                            email=lead_item.email,
+                            source=lead_item.source,
+                            service_interest=lead_item.service_interest,
+                            region=lead_item.region,
+                            on_step=on_step,
+                        )
+                        result_holder.append(run)
+                    except Exception as exc:
+                        error_holder.append(exc)
+
+                t = threading.Thread(target=_run, daemon=True)
+                t.start()
+
+                # Poll for step events and stream them while the thread runs
+                last_sent = 0
+                while t.is_alive():
+                    if len(step_events) > last_sent:
+                        for step in step_events[last_sent:]:
+                            yield _sse_event({
+                                "type": "step",
+                                "index": i,
+                                "company": lead_item.company,
+                                "step": step,
+                            })
+                        last_sent = len(step_events)
+                    import asyncio
+                    await asyncio.sleep(0.1)
+
+                # Drain any remaining steps
+                for step in step_events[last_sent:]:
+                    yield _sse_event({
+                        "type": "step",
+                        "index": i,
+                        "company": lead_item.company,
+                        "step": step,
+                    })
+
+                if error_holder:
+                    yield _sse_event({
+                        "type": "lead_error",
+                        "index": i,
+                        "company": lead_item.company,
+                        "error": str(error_holder[0]),
+                    })
+                else:
+                    run = result_holder[0]
+                    score_result = run.tool_results.get("score_lead", {})
+                    supabase_result = run.tool_results.get("log_to_supabase", {})
+                    email_draft_result = run.tool_results.get("draft_outreach_email", {})
+                    yield _sse_event({
+                        "type": "lead_done",
+                        "index": i,
+                        "lead_name": lead_item.lead_name,
+                        "company": lead_item.company,
+                        "score": score_result.get("score"),
+                        "tier": score_result.get("tier"),
+                        "reasoning": score_result.get("reasoning", ""),
+                        "recommended_action": score_result.get("recommended_action", ""),
+                        "email_subject": email_draft_result.get("subject", ""),
+                        "email_body": email_draft_result.get("body", ""),
+                        "lead_id": supabase_result.get("lead_id"),
+                        "agent_steps": run.steps,
+                        "error": run.error or None,
+                    })
+
+            except Exception as exc:
+                logger.error("Batch item %d (%s) failed: %s", i, lead_item.company, exc)
+                yield _sse_event({
+                    "type": "lead_error",
+                    "index": i,
+                    "company": lead_item.company,
+                    "error": str(exc),
+                })
+
+            # Delay between leads to respect Groq rate limits (30 RPM)
+            if i < len(batch.leads) - 1:
+                time.sleep(BATCH_LEAD_DELAY_SECONDS)
+
+        yield _sse_event({"type": "batch_done", "total": len(batch.leads)})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Disable Nginx buffering on Render
+        },
+    )
+
+
 @app.post("/qualify-lead", response_model=LeadResponse)
 def qualify_lead(
     lead: LeadRequest,
@@ -137,6 +348,7 @@ def qualify_lead(
             email=lead.email,
             source=lead.source,
             service_interest=lead.service_interest,
+            region=lead.region,
         )
     except Exception as exc:
         logger.error("Agent run failed: %s", exc)

@@ -67,6 +67,8 @@ def log_lead(lead_profile: dict[str, Any]) -> dict[str, Any]:
         "email_subject":      _safe_str(lead_profile.get("email_subject"), 500),
         "status":             "new",
         "agent_steps":        _safe_int(lead_profile.get("agent_steps")),
+        "region":             _safe_str(lead_profile.get("region"), 100),
+        "email_status":       _safe_str(lead_profile.get("email_status"), 20),
     }
 
     # Remove None values — let Supabase use column defaults
@@ -86,6 +88,27 @@ def log_lead(lead_profile: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         logger.error("Supabase insert failed: %s", exc)
         return {"success": False, "lead_id": None, "error": str(exc)}
+
+
+def fetch_leads(limit: int = 50, offset: int = 0) -> dict:
+    """
+    Fetch paginated lead records from Supabase for the run history dashboard.
+
+    Returns selected fields only — never the full email_draft body here.
+    """
+    try:
+        client = _get_client()
+        result = (
+            client.table("leads")
+            .select("*")
+            .order("created_at", desc=True)
+            .range(offset, offset + limit - 1)
+            .execute()
+        )
+        return {"success": True, "leads": result.data or [], "error": None}
+    except Exception as exc:
+        logger.error("fetch_leads failed: %s", exc)
+        return {"success": False, "leads": [], "error": str(exc)}
 
 
 # ---------------------------------------------------------------------------
