@@ -1269,16 +1269,16 @@ export default function DashboardPage() {
                     <TierBadge tier={lead.tier} />
                     <div className="flex items-center gap-1.5">
                       {lead.email_status === "sent" && (
-                        <Check size={14} className="text-emerald-400" title="Email sent" />
+                        <Check size={14} className="text-emerald-400" />
                       )}
                       {lead.email_status === "failed" && (
-                        <XCircle size={14} className="text-red-400" title="Email failed" />
+                        <XCircle size={14} className="text-red-400" />
                       )}
                       {lead.email_status === "skipped" && (
-                        <Minus size={14} className="text-zinc-600" title="Email skipped" />
+                        <Minus size={14} className="text-zinc-600" />
                       )}
                       {lead.telegram_status === "sent" && (
-                        <MessageSquare size={14} className="text-blue-400" title="Telegram sent" />
+                        <MessageSquare size={14} className="text-blue-400" />
                       )}
                     </div>
                     <span className="text-zinc-400 text-xs truncate">
