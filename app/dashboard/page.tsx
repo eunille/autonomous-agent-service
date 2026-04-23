@@ -1020,7 +1020,7 @@ export default function DashboardPage() {
                 disabled={
                   isRunning || 
                   batchInputRows.filter((r) => r.company.trim()).length === 0 ||
-                  (rateLimit && rateLimit.remaining === 0)
+                  (rateLimit?.remaining === 0)
                 }
                 className="w-full bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold gap-2 disabled:opacity-50"
               >
