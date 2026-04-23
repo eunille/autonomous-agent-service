@@ -112,6 +112,195 @@ def fetch_leads(limit: int = 50, offset: int = 0) -> dict:
         return {"success": False, "leads": [], "error": str(exc)}
 
 
+def check_duplicate(company: str, email: str) -> dict:
+    """
+    Check if a lead with the same company name or email already exists.
+    
+    Args:
+        company: Company name to check
+        email: Email address to check
+        
+    Returns:
+        dict with: is_duplicate (bool), existing_lead (dict or None), error (str or None)
+    """
+    try:
+        client = _get_client()
+        
+        # Search by company name (case-insensitive) or email (exact match)
+        result = (
+            client.table("leads")
+            .select("id, company, email, tier, score, created_at")
+            .or_(f"company.ilike.{company},email.eq.{email}")
+            .limit(1)
+            .execute()
+        )
+        
+        if result.data and len(result.data) > 0:
+            return {
+                "is_duplicate": True,
+                "existing_lead": result.data[0],
+                "error": None,
+            }
+        
+        return {"is_duplicate": False, "existing_lead": None, "error": None}
+        
+    except Exception as exc:
+        logger.error("check_duplicate failed: %s", exc)
+        return {"is_duplicate": False, "existing_lead": None, "error": str(exc)}
+
+
+def delete_leads_by_ids(lead_ids: list[str]) -> dict[str, Any]:
+    """
+    Delete multiple leads by their IDs.
+    
+    Args:
+        lead_ids: List of lead IDs to delete
+        
+    Returns:
+        dict with: success (bool), deleted_count (int), error (str or None)
+    """
+    try:
+        client = _get_client()
+        
+        # Delete leads matching the IDs
+        result = (
+            client.table("leads")
+            .delete()
+            .in_("id", lead_ids)
+            .execute()
+        )
+        
+        deleted_count = len(result.data) if result.data else 0
+        logger.info("Deleted %d leads", deleted_count)
+        
+        return {
+            "success": True,
+            "deleted_count": deleted_count,
+            "error": None,
+        }
+        
+    except Exception as exc:
+        logger.error("delete_leads_by_ids failed: %s", exc)
+        return {
+            "success": False,
+            "deleted_count": 0,
+            "error": str(exc),
+        }
+
+
+def update_lead_by_id(lead_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    """
+    Update an existing lead by ID.
+    
+    Args:
+        lead_id: Lead ID to update
+        updates: Dict of fields to update
+        
+    Returns:
+        dict with: success (bool), error (str or None)
+    """
+    try:
+        client = _get_client()
+        
+        # Build update payload with safe conversions
+        update_payload = {}
+        for key, value in updates.items():
+            if key in ("score", "agent_steps"):
+                update_payload[key] = _safe_int(value)
+            elif key == "tier":
+                update_payload[key] = _safe_tier(value)
+            elif key in ("key_talking_points", "risk_flags"):
+                update_payload[key] = _safe_list(value)
+            else:
+                update_payload[key] = _safe_str(value, 2000)
+        
+        # Update the lead
+        result = (
+            client.table("leads")
+            .update(update_payload)
+            .eq("id", lead_id)
+            .execute()
+        )
+        
+        if not result.data:
+            return {
+                "success": False,
+                "error": f"Lead {lead_id} not found",
+            }
+        
+        logger.info("Updated lead %s", lead_id)
+        
+        return {
+            "success": True,
+            "error": None,
+        }
+        
+    except Exception as exc:
+        logger.error("update_lead_by_id failed: %s", exc)
+        return {
+            "success": False,
+            "error": str(exc),
+        }
+
+
+def fetch_stats() -> dict:
+    """
+    Fetch aggregated statistics from all leads.
+    
+    Returns:
+        dict with: success (bool), stats (dict), error (str or None)
+        stats contains: total_leads, hot_count, warm_count, cold_count, 
+                       disqualify_count, avg_score, recent_count (last 7 days)
+    """
+    try:
+        client = _get_client()
+        
+        # Fetch all leads with tier and score
+        result = (
+            client.table("leads")
+            .select("tier, score, created_at")
+            .execute()
+        )
+        
+        leads = result.data or []
+        total_leads = len(leads)
+        
+        # Count by tier
+        hot_count = sum(1 for lead in leads if lead.get("tier") == "HOT")
+        warm_count = sum(1 for lead in leads if lead.get("tier") == "WARM")
+        cold_count = sum(1 for lead in leads if lead.get("tier") == "COLD")
+        disqualify_count = sum(1 for lead in leads if lead.get("tier") == "DISQUALIFY")
+        
+        # Calculate average score (excluding nulls)
+        scores = [lead.get("score") for lead in leads if lead.get("score") is not None]
+        avg_score = round(sum(scores) / len(scores), 1) if scores else 0
+        
+        # Count recent leads (last 7 days)
+        from datetime import datetime, timedelta, timezone
+        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        recent_count = sum(
+            1 for lead in leads 
+            if lead.get("created_at") and 
+            datetime.fromisoformat(lead["created_at"].replace("Z", "+00:00")) > seven_days_ago
+        )
+        
+        stats = {
+            "total_leads": total_leads,
+            "hot_count": hot_count,
+            "warm_count": warm_count,
+            "cold_count": cold_count,
+            "disqualify_count": disqualify_count,
+            "avg_score": avg_score,
+            "recent_count": recent_count,
+        }
+        
+        return {"success": True, "stats": stats, "error": None}
+        
+    except Exception as exc:
+        logger.error("fetch_stats failed: %s", exc)
+        return {"success": False, "stats": {}, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Input sanitization helpers
 # ---------------------------------------------------------------------------
@@ -145,6 +334,84 @@ def _safe_list(value: Any) -> list[str] | None:
     if isinstance(value, list):
         return [str(item)[:500] for item in value if item is not None][:20]
     return [str(value)[:500]]
+
+
+def increment_rate_limit() -> dict[str, Any]:
+    """
+    Increment the rate limit counter for today.
+    
+    Returns:
+        dict with: success (bool), current_count (int), limit (int), error (str or None)
+    """
+    try:
+        from datetime import date
+        client = _get_client()
+        today = date.today().isoformat()
+        DAILY_LIMIT = 140  # Groq daily limit
+        
+        # Get current count
+        result = client.table("rate_limits").select("request_count").eq("date", today).execute()
+        
+        if result.data and len(result.data) > 0:
+            # Update existing record
+            current_count = result.data[0]["request_count"]
+            new_count = current_count + 1
+            client.table("rate_limits").update({"request_count": new_count}).eq("date", today).execute()
+        else:
+            # Insert new record for today
+            new_count = 1
+            client.table("rate_limits").insert({"date": today, "request_count": new_count}).execute()
+        
+        return {
+            "success": True,
+            "current_count": new_count,
+            "limit": DAILY_LIMIT,
+            "error": None,
+        }
+    except Exception as exc:
+        logger.error("increment_rate_limit failed: %s", exc)
+        return {
+            "success": False,
+            "current_count": 0,
+            "limit": 140,
+            "error": str(exc),
+        }
+
+
+def get_rate_limit_status() -> dict[str, Any]:
+    """
+    Get the current rate limit status for today.
+    
+    Returns:
+        dict with: current_count (int), limit (int), remaining (int), error (str or None)
+    """
+    try:
+        from datetime import date
+        client = _get_client()
+        today = date.today().isoformat()
+        DAILY_LIMIT = 140
+        
+        result = client.table("rate_limits").select("request_count").eq("date", today).execute()
+        
+        if result.data and len(result.data) > 0:
+            current_count = result.data[0]["request_count"]
+        else:
+            current_count = 0
+        
+        return {
+            "current_count": current_count,
+            "limit": DAILY_LIMIT,
+            "remaining": max(0, DAILY_LIMIT - current_count),
+            "error": None,
+        }
+    except Exception as exc:
+        logger.error("get_rate_limit_status failed: %s", exc)
+        return {
+            "current_count": 0,
+            "limit": 140,
+            "remaining": 140,
+            "error": str(exc),
+        }
 
 
 if __name__ == "__main__":

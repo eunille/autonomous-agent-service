@@ -44,7 +44,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["POST", "GET"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -153,6 +153,156 @@ def list_leads(
     return {"leads": result["leads"], "limit": limit, "offset": offset}
 
 
+@app.get("/stats")
+def get_stats(_: str = Depends(require_api_key)) -> dict:
+    """
+    Fetch aggregated statistics for the dashboard.
+    
+    Requires X-API-Key header.
+    """
+    from database import fetch_stats
+    
+    result = fetch_stats()
+    if not result["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "Failed to fetch stats."),
+        )
+    return result["stats"]
+
+
+@app.get("/rate-limits")
+def get_rate_limits(_: str = Depends(require_api_key)) -> dict:
+    """
+    Get current rate limit status for Groq API.
+    
+    Requires X-API-Key header.
+    """
+    from database import get_rate_limit_status
+    
+    result = get_rate_limit_status()
+    if result.get("error"):
+        logger.warning("get_rate_limit_status error: %s", result["error"])
+    
+    return {
+        "current_count": result["current_count"],
+        "limit": result["limit"],
+        "remaining": result["remaining"],
+    }
+
+
+class DeleteLeadsRequest(BaseModel):
+    lead_ids: list[str]
+
+
+@app.delete("/leads")
+def delete_leads(
+    request: DeleteLeadsRequest,
+    _: str = Depends(require_api_key),
+) -> dict:
+    """
+    Delete multiple leads by ID.
+    
+    Requires X-API-Key header.
+    """
+    from database import delete_leads_by_ids
+    
+    if not request.lead_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No lead IDs provided.",
+        )
+    
+    result = delete_leads_by_ids(request.lead_ids)
+    if not result["success"]:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=result.get("error", "Failed to delete leads."),
+        )
+    
+    return {
+        "success": True,
+        "deleted_count": result["deleted_count"],
+    }
+
+
+class RequalifyLeadRequest(BaseModel):
+    lead_id: str
+    company: str = Field(..., min_length=1, max_length=255)
+    email: str = Field(..., min_length=1, max_length=255)
+    lead_name: str = Field(default="Contact", max_length=255)
+    region: str = Field(default="Philippines", max_length=100)
+
+
+@app.post("/qualify-lead")
+def requalify_lead(
+    request: RequalifyLeadRequest,
+    _: str = Depends(require_api_key),
+) -> dict:
+    """
+    Re-qualify an existing lead with fresh data.
+    Updates the existing record instead of creating a new one.
+    
+    Requires X-API-Key header.
+    """
+    from agent import run_agent
+    from database import update_lead_by_id
+    
+    try:
+        # Run the agent
+        run = run_agent(
+            lead_name=request.lead_name,
+            company=request.company,
+            email=request.email,
+            source="requalify",
+            region=request.region,
+        )
+        
+        # Extract results
+        score_result = run.tool_results.get("score_lead", {})
+        email_draft_result = run.tool_results.get("draft_outreach_email", {})
+        
+        # Update the existing lead
+        update_result = update_lead_by_id(
+            lead_id=request.lead_id,
+            updates={
+                "score": score_result.get("score"),
+                "tier": score_result.get("tier"),
+                "reasoning": score_result.get("reasoning", ""),
+                "key_talking_points": score_result.get("key_talking_points", []),
+                "risk_flags": score_result.get("risk_flags", []),
+                "recommended_action": score_result.get("recommended_action", ""),
+                "email_subject": email_draft_result.get("subject", ""),
+                "email_draft": email_draft_result.get("body", ""),
+                "company": request.company,
+                "email": request.email,
+                "lead_name": request.lead_name,
+                "region": request.region,
+            },
+        )
+        
+        if not update_result["success"]:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=update_result.get("error", "Failed to update lead."),
+            )
+        
+        return {
+            "success": True,
+            "lead_id": request.lead_id,
+            "score": score_result.get("score"),
+            "tier": score_result.get("tier"),
+            "reasoning": score_result.get("reasoning", ""),
+        }
+        
+    except Exception as exc:
+        logger.error("requalify_lead failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to re-qualify lead: {exc}",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Batch qualification — Server-Sent Events stream
 # ---------------------------------------------------------------------------
@@ -220,6 +370,35 @@ def qualify_batch(
                 "lead_name": lead_item.lead_name,
                 "company": lead_item.company,
             })
+
+            # Check for duplicate lead
+            from database import check_duplicate
+            dup_result = check_duplicate(lead_item.company, lead_item.email)
+            
+            if dup_result["is_duplicate"]:
+                existing = dup_result["existing_lead"]
+                yield _sse_event({
+                    "type": "lead_done",
+                    "index": i,
+                    "lead_name": lead_item.lead_name,
+                    "company": lead_item.company,
+                    "score": existing.get("score"),
+                    "tier": existing.get("tier"),
+                    "reasoning": "",
+                    "recommended_action": "",
+                    "email_subject": "",
+                    "email_body": "",
+                    "lead_id": existing.get("id"),
+                    "agent_steps": 0,
+                    "error": None,
+                    "duplicate": True,
+                    "existing_created_at": existing.get("created_at"),
+                })
+                
+                # Delay and continue to next lead
+                if i < len(batch.leads) - 1:
+                    time.sleep(BATCH_LEAD_DELAY_SECONDS)
+                continue
 
             step_events: list[str] = []
 

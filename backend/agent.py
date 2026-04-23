@@ -123,11 +123,20 @@ def run_agent(
         }
         run.error = str(exc)
 
-    run.tool_results["score_lead"] = score_result
+    run.tool_results["score_lead"] = score_result0
     run.steps += 1
     tier = score_result.get("tier", "UNKNOWN")
     score = score_result.get("score", 0)
     logger.info("Lead scored: %s/100 — %s", score, tier)
+    
+    # Track rate limit for Groq API usage
+    try:
+        from database import increment_rate_limit
+        rate_limit_result = increment_rate_limit()
+        if rate_limit_result["success"]:
+            logger.info("Rate limit: %d/%d", rate_limit_result["current_count"], rate_limit_result["limit"])
+    except Exception as exc:
+        logger.warning("Failed to increment rate limit: %s", exc)
 
     # ── Step 3: Draft outreach email (score >= 40 only) ───────────────────
     email_result: dict[str, Any] = {}

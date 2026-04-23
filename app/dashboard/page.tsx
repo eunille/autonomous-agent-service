@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { Toaster, toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -26,6 +26,13 @@ import {
   Check,
   MessageSquare,
   Minus,
+  TrendingUp,
+  Flame,
+  Target,
+  Calendar,
+  Download,
+  Search,
+  Activity,
 } from "lucide-react"
 
 // ---------------------------------------------------------------------------
@@ -55,6 +62,8 @@ interface BatchRow {
   leadId: string | null
   agentSteps: number | null
   error: string | null
+  duplicate?: boolean
+  existingCreatedAt?: string
 }
 
 interface HistoryLead {
@@ -147,7 +156,14 @@ function formatDate(iso: string) {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function TierBadge({ tier }: { tier: string | null }) {
+function TierBadge({ tier, duplicate }: { tier: string | null; duplicate?: boolean }) {
+  if (duplicate) {
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border bg-purple-500/20 text-purple-400 border-purple-500/30">
+        DUPLICATE
+      </span>
+    )
+  }
   if (!tier) return null
   return (
     <span
@@ -226,8 +242,6 @@ export default function DashboardPage() {
   )
   const [batchInputRows, setBatchInputRows] = useState<BatchInputRow[]>([
     { id: crypto.randomUUID(), company: "", email: "", leadName: "" },
-    { id: crypto.randomUUID(), company: "", email: "", leadName: "" },
-    { id: crypto.randomUUID(), company: "", email: "", leadName: "" },
   ])
   const [defaultRegion, setDefaultRegion] = useState("Philippines")
   const [isRunning, setIsRunning] = useState(false)
@@ -241,6 +255,28 @@ export default function DashboardPage() {
   const [expandedHistory, setExpandedHistory] = useState<Set<string>>(new Set())
   const [historyPage, setHistoryPage] = useState(1)
   const [hasMore, setHasMore] = useState(false)
+  const [searchQuery, setSearchQuery] = useState("")
+  const [tierFilter, setTierFilter] = useState<string>("All")
+  const [selectedLeadIds, setSelectedLeadIds] = useState<Set<string>>(new Set())
+
+  // Stats
+  const [stats, setStats] = useState<{
+    total_leads: number
+    hot_count: number
+    warm_count: number
+    cold_count: number
+    disqualify_count: number
+    avg_score: number
+    recent_count: number
+  } | null>(null)
+  const [statsLoading, setStatsLoading] = useState(false)
+  
+  const [rateLimit, setRateLimit] = useState<{
+    current_count: number
+    limit: number
+    remaining: number
+  } | null>(null)
+  const [rateLimitLoading, setRateLimitLoading] = useState(false)
 
   const abortRef = useRef<AbortController | null>(null)
 
@@ -293,6 +329,56 @@ export default function DashboardPage() {
   useEffect(() => {
     if (authed) fetchHistory(1)
   }, [authed, fetchHistory])
+
+  //  ── Stats ──────────────────────────────────────────────────────────────
+  const fetchStats = useCallback(async () => {
+    setStatsLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/stats`, {
+        headers: { "X-API-Key": API_KEY },
+      })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      const data = await res.json()
+      setStats(data)
+    } catch (err) {
+      console.error("Failed to load stats:", err)
+    } finally {
+      setStatsLoading(false)
+    }
+  }, [])
+  
+  const fetchRateLimit = useCallback(async () => {
+    setRateLimitLoading(true)
+    try {
+      const res = await fetch(`${API_BASE}/rate-limits`, {
+        headers: { "X-API-Key": API_KEY },
+      })
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+      const data = await res.json()
+      setRateLimit(data)
+      
+      // Show warning toast if approaching limit (>85% usage)
+      if (data.limit > 0) {
+        const usage = (data.current_count / data.limit) * 100
+        if (usage > 85) {
+          toast.warning(`API quota: ${data.current_count}/${data.limit} (${Math.round(usage)}%)`, {
+            description: usage >= 100 ? "Daily quota exhausted!" : "Approaching daily limit",
+          })
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load rate limit:", err)
+    } finally {
+      setRateLimitLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (authed) {
+      fetchStats()
+      fetchRateLimit()
+    }
+  }, [authed, fetchStats, fetchRateLimit])
 
   // ── Batch run ───────────────────────────────────────────────────────────
   function addInputRow() {
@@ -399,6 +485,8 @@ export default function DashboardPage() {
     } finally {
       setIsRunning(false)
       fetchHistory()
+      fetchStats()
+      fetchRateLimit()
     }
   }
 
@@ -428,6 +516,8 @@ export default function DashboardPage() {
                 leadId: (event.lead_id as string) || null,
                 agentSteps: (event.agent_steps as number) || null,
                 error: null,
+                duplicate: event.duplicate as boolean | undefined,
+                existingCreatedAt: event.existing_created_at as string | undefined,
               }
             : row
         )
@@ -465,6 +555,170 @@ export default function DashboardPage() {
       }
       return next
     })
+  }
+
+  // ── Filter and export ───────────────────────────────────────────────────
+  const filteredHistory = useMemo(() => {
+    return history.filter((lead) => {
+      // Search filter
+      const searchLower = searchQuery.toLowerCase()
+      const matchesSearch =
+        !searchQuery ||
+        lead.company.toLowerCase().includes(searchLower) ||
+        lead.lead_name.toLowerCase().includes(searchLower)
+
+      // Tier filter
+      const matchesTier = tierFilter === "All" || lead.tier === tierFilter
+
+      return matchesSearch && matchesTier
+    })
+  }, [history, searchQuery, tierFilter])
+
+  // ── Bulk delete ─────────────────────────────────────────────────────────
+  function toggleSelectLead(id: string) {
+    setSelectedLeadIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+  
+  function toggleSelectAll() {
+    if (selectedLeadIds.size === filteredHistory.length && filteredHistory.length > 0) {
+      setSelectedLeadIds(new Set())
+    } else {
+      setSelectedLeadIds(new Set(filteredHistory.map((lead) => lead.id)))
+    }
+  }
+  
+  async function deleteSelected() {
+    if (selectedLeadIds.size === 0) return
+    
+    const confirmed = confirm(
+      `Delete ${selectedLeadIds.size} lead${selectedLeadIds.size > 1 ? "s" : ""}? This cannot be undone.`
+    )
+    if (!confirmed) return
+    
+    try {
+      const res = await fetch(`${API_BASE}/leads`, {
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": API_KEY,
+        },
+        body: JSON.stringify({ lead_ids: Array.from(selectedLeadIds) }),
+      })
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}))
+        throw new Error(errorData.detail || `Server returned ${res.status}`)
+      }
+      
+      const result = await res.json()
+      toast.success(`Deleted ${result.deleted_count} lead${result.deleted_count > 1 ? "s" : ""}`)
+      
+      setSelectedLeadIds(new Set())
+      fetchHistory(historyPage)
+      fetchStats()
+    } catch (err) {
+      console.error("Delete failed:", err)
+      toast.error(`Failed to delete: ${(err as Error).message}`)
+    }
+  }
+  
+  // ── Re-qualify ──────────────────────────────────────────────────────────
+  async function requalifyLead(lead: HistoryLead) {
+    const confirmed = confirm(
+      `Re-qualify "${lead.company}"? This will update the lead with fresh data from the pipeline.`
+    )
+    if (!confirmed) return
+    
+    try {
+      toast.info(`Re-qualifying ${lead.company}...`)
+      
+      const res = await fetch(`${API_BASE}/qualify-lead`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": API_KEY,
+        },
+        body: JSON.stringify({
+          lead_id: lead.id,
+          company: lead.company,
+          email: lead.email,
+          lead_name: lead.lead_name,
+          region: lead.region || "Philippines",
+        }),
+      })
+      
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}))
+        throw new Error(errorData.detail || `Server returned ${res.status}`)
+      }
+      
+      const result = await res.json()
+      toast.success(`Re-qualified ${lead.company}: ${result.tier} (${result.score}/100)`)
+      
+      fetchHistory(historyPage)
+      fetchStats()
+      fetchRateLimit()
+    } catch (err) {
+      console.error("Re-qualify failed:", err)
+      toast.error(`Failed to re-qualify: ${(err as Error).message}`)
+    }
+  }
+
+  function exportCSV() {
+    if (history.length === 0) return
+
+    // CSV headers
+    const headers = [
+      "Company",
+      "Lead Name",
+      "Email",
+      "Score",
+      "Tier",
+      "Action",
+      "Email Status",
+      "Telegram Status",
+      "Region",
+      "Date",
+    ]
+
+    // CSV rows
+    const rows = history.map((lead) => [
+      lead.company,
+      lead.lead_name,
+      lead.email,
+      lead.score ?? "",
+      lead.tier ?? "",
+      lead.recommended_action ?? "",
+      lead.email_status ?? "",
+      lead.telegram_status ?? "",
+      lead.region ?? "",
+      lead.created_at ? formatDate(lead.created_at) : "",
+    ])
+
+    // Build CSV content
+    const csvContent = [
+      headers.join(","),
+      ...rows.map((row) => row.map((cell) => `"${cell}"`).join(",")),
+    ].join("\n")
+
+    // Trigger download
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" })
+    const link = document.createElement("a")
+    const url = URL.createObjectURL(blob)
+    link.setAttribute("href", url)
+    link.setAttribute("download", `leads-${new Date().toISOString().split("T")[0]}.csv`)
+    link.style.visibility = "hidden"
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
   }
 
   // ── CSV upload ──────────────────────────────────────────────────────────
@@ -557,6 +811,26 @@ export default function DashboardPage() {
             <span className="text-zinc-500 text-xs ml-2">Lead Intelligence Dashboard</span>
           </div>
         </div>
+        
+        {/* Rate Limit Widget */}
+        {rateLimit && (
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border bg-zinc-900 border-zinc-700">
+            <span className="text-zinc-400 text-xs">API Quota:</span>
+            <span className={`text-sm font-mono font-semibold ${
+              rateLimit.current_count >= rateLimit.limit 
+                ? "text-red-400" 
+                : rateLimit.current_count / rateLimit.limit > 0.85 
+                ? "text-orange-400" 
+                : "text-emerald-400"
+            }`}>
+              {rateLimit.current_count}/{rateLimit.limit}
+            </span>
+            <span className="text-zinc-500 text-xs">
+              ({rateLimit.remaining} left)
+            </span>
+          </div>
+        )}
+        
         <div className="flex items-center gap-2">
           <Button
             variant="ghost"
@@ -579,13 +853,60 @@ export default function DashboardPage() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-6 py-8 space-y-10">
+      <main className="max-w-7xl mx-auto px-6 py-6 space-y-6">
+
+        {/* ── Stats cards ── */}
+        {stats && (
+          <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {/* Total Leads */}
+            <div className="border border-zinc-800 rounded-lg px-3.5 py-3 bg-zinc-900/30 hover:bg-zinc-900/50 transition-colors">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-zinc-500 text-[10px] uppercase tracking-wider font-medium">Total Leads</span>
+                <TrendingUp size={13} className="text-emerald-400" />
+              </div>
+              <p className="text-zinc-100 text-xl font-bold">{stats.total_leads}</p>
+              <p className="text-zinc-600 text-[10px] mt-0.5">All time</p>
+            </div>
+
+            {/* HOT Leads */}
+            <div className="border border-zinc-800 rounded-lg px-3.5 py-3 bg-zinc-900/30 hover:bg-zinc-900/50 transition-colors">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-zinc-500 text-[10px] uppercase tracking-wider font-medium">HOT Leads</span>
+                <Flame size={13} className="text-red-400" />
+              </div>
+              <p className="text-zinc-100 text-xl font-bold">{stats.hot_count}</p>
+              <p className="text-zinc-600 text-[10px] mt-0.5">
+                {stats.total_leads > 0 ? Math.round((stats.hot_count / stats.total_leads) * 100) : 0}% of total
+              </p>
+            </div>
+
+            {/* Average Score */}
+            <div className="border border-zinc-800 rounded-lg px-3.5 py-3 bg-zinc-900/30 hover:bg-zinc-900/50 transition-colors">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-zinc-500 text-[10px] uppercase tracking-wider font-medium">Avg Score</span>
+                <Target size={13} className="text-blue-400" />
+              </div>
+              <p className="text-zinc-100 text-xl font-bold">{stats.avg_score}</p>
+              <p className="text-zinc-600 text-[10px] mt-0.5">/100 points</p>
+            </div>
+
+            {/* Recent (7d) */}
+            <div className="border border-zinc-800 rounded-lg px-3.5 py-3 bg-zinc-900/30 hover:bg-zinc-900/50 transition-colors">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-zinc-500 text-[10px] uppercase tracking-wider font-medium">Recent</span>
+                <Calendar size={13} className="text-emerald-400" />
+              </div>
+              <p className="text-zinc-100 text-xl font-bold">{stats.recent_count}</p>
+              <p className="text-zinc-600 text-[10px] mt-0.5">Last 7 days</p>
+            </div>
+          </section>
+        )}
 
         {/* ── Batch input ── */}
-        <section className="space-y-4">
+        <section className="space-y-3">
           <div>
-            <h2 className="text-zinc-100 font-semibold text-base">Batch Qualification</h2>
-            <p className="text-zinc-500 text-sm mt-0.5">
+            <h2 className="text-zinc-100 font-semibold text-lg">Batch Qualification</h2>
+            <p className="text-zinc-500 text-xs mt-0.5">
               Enter company details below — one company per row
             </p>
           </div>
@@ -665,12 +986,24 @@ export default function DashboardPage() {
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label className="text-zinc-400 text-sm">Region</Label>
-                <Input
+                <select
                   value={defaultRegion}
                   onChange={(e) => setDefaultRegion(e.target.value)}
-                  placeholder="Philippines"
-                  className="bg-zinc-900 border-zinc-700 text-zinc-100 placeholder:text-zinc-600"
-                />
+                  className="w-full bg-zinc-900 border border-zinc-700 text-zinc-100 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                >
+                  <option value="Philippines">Philippines</option>
+                  <option value="Singapore">Singapore</option>
+                  <option value="Malaysia">Malaysia</option>
+                  <option value="Indonesia">Indonesia</option>
+                  <option value="Thailand">Thailand</option>
+                  <option value="Vietnam">Vietnam</option>
+                  <option value="United States">United States</option>
+                  <option value="United Kingdom">United Kingdom</option>
+                  <option value="Canada">Canada</option>
+                  <option value="Australia">Australia</option>
+                  <option value="India">India</option>
+                  <option value="Global">Global</option>
+                </select>
               </div>
 
               <div className="space-y-2">
@@ -685,7 +1018,9 @@ export default function DashboardPage() {
               <Button
                 onClick={runBatch}
                 disabled={
-                  isRunning || batchInputRows.filter((r) => r.company.trim()).length === 0
+                  isRunning || 
+                  batchInputRows.filter((r) => r.company.trim()).length === 0 ||
+                  (rateLimit && rateLimit.remaining === 0)
                 }
                 className="w-full bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-semibold gap-2 disabled:opacity-50"
               >
@@ -694,6 +1029,8 @@ export default function DashboardPage() {
                     <Loader2 size={14} className="animate-spin" />
                     Running
                   </>
+                ) : rateLimit && rateLimit.remaining === 0 ? (
+                  <>Quota Exhausted</>
                 ) : (
                   <>
                     <Play size={14} />
@@ -708,7 +1045,10 @@ export default function DashboardPage() {
         {/* ── Live results ── */}
         {batchRows.length > 0 && (
           <section className="space-y-3">
-            <h2 className="text-zinc-100 font-semibold text-base">Live Results</h2>
+            <div className="flex items-center gap-2">
+              <Activity size={15} className="text-emerald-400" />
+              <h2 className="text-zinc-100 font-semibold text-lg">Live Results</h2>
+            </div>
             <div className="border border-zinc-800 rounded-xl overflow-hidden">
               {batchRows.map((row) => (
                 <div key={row.index} className="border-b border-zinc-800 last:border-b-0">
@@ -734,12 +1074,21 @@ export default function DashboardPage() {
                     {row.score !== null && (
                       <span className="text-zinc-300 text-sm font-mono">{row.score}/100</span>
                     )}
-                    <TierBadge tier={row.tier} />
+                    <TierBadge tier={row.tier} duplicate={row.duplicate} />
                   </button>
 
                   {/* Expanded content */}
                   {expandedRows.has(row.index) && (
                     <div className="px-8 pb-4 space-y-4 bg-zinc-900/30">
+                      {row.duplicate && (
+                        <div className="flex items-start gap-2 text-purple-400 text-sm">
+                          <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+                          <div>
+                            <p>This lead was already qualified on {row.existingCreatedAt ? new Date(row.existingCreatedAt).toLocaleDateString() : "a previous date"}.</p>
+                            <p className="text-zinc-500 text-xs mt-1">Showing existing data to avoid wasting API quota.</p>
+                          </div>
+                        </div>
+                      )}
                       {row.error && (
                         <div className="flex items-start gap-2 text-red-400 text-sm">
                           <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
@@ -788,10 +1137,60 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Inbox size={15} className="text-zinc-400" />
-              <h2 className="text-zinc-100 font-semibold text-base">Run History</h2>
+              <h2 className="text-zinc-100 font-semibold text-lg">Run History</h2>
             </div>
-            {historyLoading && <Loader2 size={14} className="animate-spin text-zinc-500" />}
+            <div className="flex items-center gap-2">
+              {historyLoading && <Loader2 size={14} className="animate-spin text-zinc-500" />}
+              {selectedLeadIds.size > 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={deleteSelected}
+                  className="text-zinc-400 hover:text-red-400 hover:bg-zinc-800 gap-1.5"
+                >
+                  <X size={14} />
+                  Delete ({selectedLeadIds.size})
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={exportCSV}
+                disabled={history.length === 0}
+                className="text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 gap-1.5 disabled:opacity-30"
+              >
+                <Download size={14} />
+                Export CSV
+              </Button>
+            </div>
           </div>
+
+          {/* Filters */}
+          {history.length > 0 && (
+            <div className="flex gap-2">
+              <div className="flex-1 relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                <Input
+                  type="text"
+                  placeholder="Search company or lead name..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-600 h-9 pl-9"
+                />
+              </div>
+              <select
+                value={tierFilter}
+                onChange={(e) => setTierFilter(e.target.value)}
+                className="bg-zinc-900 border border-zinc-800 text-zinc-100 rounded-md px-3 h-9 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              >
+                <option value="All">All Tiers</option>
+                <option value="HOT">HOT</option>
+                <option value="WARM">WARM</option>
+                <option value="COLD">COLD</option>
+                <option value="DISQUALIFY">DISQUALIFY</option>
+              </select>
+            </div>
+          )}
 
           {historyError && (
             <div className="flex items-center gap-2 text-red-400 text-sm border border-red-900/50 rounded-lg px-3 py-2 bg-red-950/20">
@@ -806,11 +1205,31 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {history.length > 0 && (
+          {history.length > 0 && filteredHistory.length === 0 && (
+            <div className="text-center py-10 text-zinc-600 text-sm border border-zinc-800/50 rounded-xl">
+              No leads match your search criteria.
+            </div>
+          )}
+
+          {history.length > 0 && filteredHistory.length > 0 && (
             <div className="space-y-3">
             <div className="border border-zinc-800 rounded-xl overflow-hidden">
               {/* Table header */}
-              <div className="grid grid-cols-[1fr_100px_80px_100px_120px_140px] gap-4 px-4 py-2.5 bg-zinc-900 border-b border-zinc-800 text-xs text-zinc-500 uppercase tracking-wide font-medium">
+              <div className="grid grid-cols-[40px_1fr_100px_80px_100px_120px_140px] gap-4 px-4 py-2.5 bg-zinc-900 border-b border-zinc-800 text-xs text-zinc-500 uppercase tracking-wide font-medium">
+                <div className="flex items-center justify-center">
+                  <div
+                    onClick={toggleSelectAll}
+                    className="w-4 h-4 rounded border-2 border-zinc-600 bg-zinc-800 cursor-pointer hover:border-zinc-500 transition-colors flex items-center justify-center"
+                    style={{
+                      backgroundColor: selectedLeadIds.size === filteredHistory.length && filteredHistory.length > 0 ? '#10b981' : '',
+                      borderColor: selectedLeadIds.size === filteredHistory.length && filteredHistory.length > 0 ? '#10b981' : ''
+                    }}
+                  >
+                    {selectedLeadIds.size === filteredHistory.length && filteredHistory.length > 0 && (
+                      <Check size={12} className="text-zinc-950" strokeWidth={3} />
+                    )}
+                  </div>
+                </div>
                 <span>Company</span>
                 <span>Score</span>
                 <span>Tier</span>
@@ -819,12 +1238,27 @@ export default function DashboardPage() {
                 <span>Date</span>
               </div>
 
-              {history.map((lead) => (
+              {filteredHistory.map((lead) => (
                 <div key={lead.id} className="border-b border-zinc-800 last:border-b-0">
-                  <button
-                    onClick={() => toggleHistory(lead.id)}
-                    className="w-full grid grid-cols-[1fr_100px_80px_100px_120px_140px] gap-4 items-center px-4 py-3 hover:bg-zinc-900/40 transition-colors text-left"
-                  >
+                  <div className="w-full grid grid-cols-[40px_1fr_100px_80px_100px_120px_140px] gap-4 items-center px-4 py-3 hover:bg-zinc-900/40 transition-colors">
+                    <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
+                      <div
+                        onClick={() => toggleSelectLead(lead.id)}
+                        className="w-4 h-4 rounded border-2 border-zinc-600 bg-zinc-800 cursor-pointer hover:border-zinc-500 transition-colors flex items-center justify-center"
+                        style={{
+                          backgroundColor: selectedLeadIds.has(lead.id) ? '#10b981' : '',
+                          borderColor: selectedLeadIds.has(lead.id) ? '#10b981' : ''
+                        }}
+                      >
+                        {selectedLeadIds.has(lead.id) && (
+                          <Check size={12} className="text-zinc-950" strokeWidth={3} />
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => toggleHistory(lead.id)}
+                      className="grid grid-cols-subgrid col-span-6 items-center text-left"
+                    >
                     <div>
                       <p className="text-zinc-100 text-sm font-medium">{lead.company}</p>
                       <p className="text-zinc-500 text-xs">{lead.lead_name}</p>
@@ -853,7 +1287,8 @@ export default function DashboardPage() {
                     <span className="text-zinc-500 text-xs">
                       {lead.created_at ? formatDate(lead.created_at) : "—"}
                     </span>
-                  </button>
+                    </button>
+                  </div>
 
                   {expandedHistory.has(lead.id) && (
                     <div className="px-8 pb-4 space-y-4 bg-zinc-900/30">
@@ -872,6 +1307,19 @@ export default function DashboardPage() {
                       ) : (
                         <p className="text-zinc-500 text-sm">No email draft stored for this lead.</p>
                       )}
+                      
+                      {/* Re-qualify button */}
+                      <div className="pt-2 border-t border-zinc-800">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => requalifyLead(lead)}
+                          className="text-zinc-400 hover:text-emerald-400 hover:bg-zinc-800 gap-1.5"
+                        >
+                          <RefreshCw size={14} />
+                          Re-qualify Lead
+                        </Button>
+                      </div>
                     </div>
                   )}
                 </div>
