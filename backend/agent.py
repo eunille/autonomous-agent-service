@@ -158,22 +158,7 @@ def run_agent(
 
     run.tool_results["draft_outreach_email"] = email_result
 
-    # ── Step 4: Log to Supabase ───────────────────────────────────────────
-    lead_id = None
-    if on_step:
-        on_step("logging")
-    try:
-        lead_profile = _build_lead_profile(run)
-        log_result = log_lead(lead_profile)
-        run.tool_results["log_to_supabase"] = log_result
-        lead_id = log_result.get("id")
-        run.steps += 1
-        logger.info("Logged to Supabase — id=%s", lead_id)
-    except Exception as exc:
-        logger.error("log_to_supabase failed: %s", exc)
-        run.tool_results["log_to_supabase"] = {"error": str(exc)}
-
-    # ── Step 5: Send Telegram alert (standard) ────────────────────────────
+    # ── Step 4: Send Telegram alert (standard) ────────────────────────────
     try:
         telegram_summary = _build_telegram_summary(run)
         send_alert(telegram_summary)
@@ -207,6 +192,21 @@ def run_agent(
         except Exception as exc:
             logger.error("HOT email send failed: %s", exc)
 
+    # ── Final Step: Log to Supabase (after all operations complete) ───────
+    lead_id = None
+    if on_step:
+        on_step("logging")
+    try:
+        lead_profile = _build_lead_profile(run)
+        log_result = log_lead(lead_profile)
+        run.tool_results["log_to_supabase"] = log_result
+        lead_id = log_result.get("lead_id")
+        run.steps += 1
+        logger.info("Logged to Supabase — id=%s", lead_id)
+    except Exception as exc:
+        logger.error("log_to_supabase failed: %s", exc)
+        run.tool_results["log_to_supabase"] = {"error": str(exc)}
+
     run.final_summary = (
         f"Lead qualified: {lead_name} @ {company} — "
         f"Score {score}/100 ({tier}). "
@@ -224,6 +224,24 @@ def _build_lead_profile(run: AgentRun) -> dict:
     recent_activity = run.tool_results.get("search_recent_activity", {})
     score_result = run.tool_results.get("score_lead", {})
     email_result = run.tool_results.get("draft_outreach_email", {})
+    send_email_result = run.tool_results.get("send_email", {})
+    telegram_result = run.tool_results.get("send_telegram_alert", {})
+
+    # Determine email status
+    email_status = None
+    if send_email_result:
+        if send_email_result.get("success"):
+            email_status = "sent"
+        else:
+            email_status = "failed"
+    elif score_result.get("tier") == "HOT" and email_result.get("body"):
+        # HOT lead with draft but not sent (shouldn't happen, but defensive)
+        email_status = "pending"
+    elif score_result.get("tier") in ("WARM", "COLD", "DISQUALIFY"):
+        email_status = "skipped"
+
+    # Determine telegram status
+    telegram_status = "sent" if telegram_result.get("success") else None
 
     return {
         "lead_name": run.lead_name,
@@ -248,6 +266,8 @@ def _build_lead_profile(run: AgentRun) -> dict:
         "status": "new",
         "agent_steps": run.steps,
         "region": run.region,
+        "email_status": email_status,
+        "telegram_status": telegram_status,
     }
 
 

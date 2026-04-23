@@ -69,6 +69,7 @@ def log_lead(lead_profile: dict[str, Any]) -> dict[str, Any]:
         "agent_steps":        _safe_int(lead_profile.get("agent_steps")),
         "region":             _safe_str(lead_profile.get("region"), 100),
         "email_status":       _safe_str(lead_profile.get("email_status"), 20),
+        "telegram_status":    _safe_str(lead_profile.get("telegram_status"), 20),
     }
 
     # Remove None values — let Supabase use column defaults

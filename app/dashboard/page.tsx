@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useRef, useCallback } from "react"
+import { Toaster, toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -22,6 +23,9 @@ import {
   Plus,
   X,
   LogOut,
+  Check,
+  MessageSquare,
+  Minus,
 } from "lucide-react"
 
 // ---------------------------------------------------------------------------
@@ -61,6 +65,7 @@ interface HistoryLead {
   score: number | null
   tier: string | null
   email_status: string | null
+  telegram_status: string | null
   region: string | null
   recommended_action: string | null
   email_subject: string | null
@@ -530,6 +535,17 @@ export default function DashboardPage() {
   // ── Dashboard ────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      <Toaster
+        position="top-right"
+        toastOptions={{
+          style: {
+            background: "#18181b",
+            border: "1px solid #27272a",
+            color: "#fafafa",
+          },
+          className: "text-sm",
+        }}
+      />
       {/* Header */}
       <header className="border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -794,10 +810,11 @@ export default function DashboardPage() {
             <div className="space-y-3">
             <div className="border border-zinc-800 rounded-xl overflow-hidden">
               {/* Table header */}
-              <div className="grid grid-cols-[1fr_100px_80px_120px_140px] gap-4 px-4 py-2.5 bg-zinc-900 border-b border-zinc-800 text-xs text-zinc-500 uppercase tracking-wide font-medium">
+              <div className="grid grid-cols-[1fr_100px_80px_100px_120px_140px] gap-4 px-4 py-2.5 bg-zinc-900 border-b border-zinc-800 text-xs text-zinc-500 uppercase tracking-wide font-medium">
                 <span>Company</span>
                 <span>Score</span>
                 <span>Tier</span>
+                <span>Status</span>
                 <span>Action</span>
                 <span>Date</span>
               </div>
@@ -806,7 +823,7 @@ export default function DashboardPage() {
                 <div key={lead.id} className="border-b border-zinc-800 last:border-b-0">
                   <button
                     onClick={() => toggleHistory(lead.id)}
-                    className="w-full grid grid-cols-[1fr_100px_80px_120px_140px] gap-4 items-center px-4 py-3 hover:bg-zinc-900/40 transition-colors text-left"
+                    className="w-full grid grid-cols-[1fr_100px_80px_100px_120px_140px] gap-4 items-center px-4 py-3 hover:bg-zinc-900/40 transition-colors text-left"
                   >
                     <div>
                       <p className="text-zinc-100 text-sm font-medium">{lead.company}</p>
@@ -816,6 +833,20 @@ export default function DashboardPage() {
                       {lead.score !== null ? `${lead.score}/100` : "—"}
                     </span>
                     <TierBadge tier={lead.tier} />
+                    <div className="flex items-center gap-1.5">
+                      {lead.email_status === "sent" && (
+                        <Check size={14} className="text-emerald-400" title="Email sent" />
+                      )}
+                      {lead.email_status === "failed" && (
+                        <XCircle size={14} className="text-red-400" title="Email failed" />
+                      )}
+                      {lead.email_status === "skipped" && (
+                        <Minus size={14} className="text-zinc-600" title="Email skipped" />
+                      )}
+                      {lead.telegram_status === "sent" && (
+                        <MessageSquare size={14} className="text-blue-400" title="Telegram sent" />
+                      )}
+                    </div>
                     <span className="text-zinc-400 text-xs truncate">
                       {lead.recommended_action ?? "—"}
                     </span>
